@@ -5,7 +5,163 @@ import uuid
 import plotly.express as px
 
 # --- CORE BUSINESS LOGIC ---
+import streamlit as st
+import pandas as pd
+import json
+import uuid
+import plotly.express as px
+from datetime import datetime, timedelta
 
+# --- CORE LOGIC ---
+
+class WorkspaceManager:
+    """Generic logic for GTM container auditing and snippet generation."""
+    def __init__(self, data=None):
+        self.data = data or {}
+        self.workspace = self.data.get("containerVersion", {})
+        self.tags = self.workspace.get("tag", [])
+
+    def check_exists(self, name):
+        return any(t['name'].lower() == name.lower() for t in self.tags)
+
+    def generate_tag_json(self, config):
+        """Creates a GTM-compatible JSON for a GA4 Event."""
+        return {
+            "exportFormatVersion": 2,
+            "containerVersion": {
+                "tag": [{
+                    "name": config['name'],
+                    "type": "gaawe",
+                    "parameter": [
+                        {"type": "TEMPLATE", "key": "eventName", "value": config['event_name']},
+                        {"type": "TEMPLATE", "key": "measurementId", "value": config['target_id']}
+                    ],
+                    "fingerprint": str(uuid.uuid4())
+                }]
+            }
+        }
+
+def parse_ga4_csv(file):
+    """Skips standard GA4 export metadata rows."""
+    if file:
+        return pd.read_csv(file, skiprows=9)
+    return None
+
+# --- UI SETUP ---
+st.set_page_config(page_title="Marketing Operations Console", layout="wide")
+
+if "wizard_step" not in st.session_state:
+    st.session_state.wizard_step = 1
+    st.session_state.tag_data = {}
+
+# 1. SIDEBAR: CREDENTIALS & FILE UPLOADS
+with st.sidebar:
+    st.header("🔑 Connectivity")
+    
+    # Credentials Section (Anonymized)
+    with st.expander("API Settings", expanded=False):
+        st.text_input("Client ID", type="password", help="OAuth 2.0 Client ID")
+        st.text_input("Client Secret", type="password", help="OAuth 2.0 Client Secret")
+        st.text_input("GTM Workspace ID", placeholder="12345678")
+        if st.button("Sync Live Data"):
+            st.session_state["api_connected"] = True
+            st.success("API Mode Active")
+
+    st.divider()
+    st.subheader("📁 Manual Data Imports")
+    up_traffic = st.file_uploader("Traffic CSV", type="csv")
+    up_pages = st.file_uploader("Pages CSV", type="csv")
+    up_events = st.file_uploader("Events CSV", type="csv")
+    up_gtm = st.file_uploader("GTM JSON", type="json")
+    
+    st.divider()
+    org_label = st.text_input("Console Branding", value="Marketing Ops")
+
+# 2. DATA LOADING
+df_traffic = parse_ga4_csv(up_traffic)
+df_pages = parse_ga4_csv(up_pages)
+df_events = parse_ga4_csv(up_events)
+gtm_json = json.load(up_gtm) if up_gtm else None
+manager = WorkspaceManager(gtm_json)
+
+# 3. MAIN INTERFACE
+st.title(f"🚀 {org_label} Console")
+
+t1, t2, t3 = st.tabs(["📊 Analytics", "🔍 GTM Inspector", "🧙‍♂️ Tag Wizard"])
+
+# --- TAB 1: ANALYTICS ---
+with t1:
+    if df_traffic is not None:
+        # TOP FILTER BAR
+        with st.container(border=True):
+            f1, f2 = st.columns([1, 2])
+            with f1:
+                # Date Picker (Visual only for CSV snapshots)
+                st.date_input("Analysis Period", [datetime.now() - timedelta(days=30), datetime.now()])
+            with f2:
+                channels = df_traffic.iloc[:, 0].unique().tolist()
+                selected_chan = st.multiselect("Filter Channels", channels, default=channels)
+        
+        filtered_df = df_traffic[df_traffic.iloc[:, 0].isin(selected_chan)]
+
+        # Metrics & Graphs
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Sessions", f"{filtered_df.iloc[:, 1].sum():,.0f}")
+        m2.metric("Engagement %", f"{filtered_df.iloc[:, 3].mean():.2%}")
+        m3.metric("Key Events", f"{df_events.iloc[:, 1].sum() if df_events is not None else 0:,.0f}")
+        m4.metric("Avg. Time", f"{filtered_df.iloc[:, 4].mean():.1f}s")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.pie(filtered_df, values=filtered_df.columns[1], names=filtered_df.columns[0], title="Acquisition Share"), use_container_width=True)
+            if df_events is not None:
+                st.plotly_chart(px.bar(df_events.head(10), x=df_events.columns[0], y=df_events.columns[1], title="Event Distribution"), use_container_width=True)
+        
+        with c2:
+            if df_pages is not None:
+                st.plotly_chart(px.bar(df_pages.head(10), x=df_pages.columns[1], y=df_pages.columns[0], orientation='h', title="Top Content"), use_container_width=True)
+                st.plotly_chart(px.scatter(df_pages.head(15), x=df_pages.columns[1], y=df_pages.columns[4], size=df_pages.columns[1], hover_name=df_pages.columns[0], title="Views vs. Engagement"), use_container_width=True)
+    else:
+        st.info("Upload GA4 CSV exports in the sidebar to view performance graphs.")
+
+# --- TAB 2: GTM INSPECTOR ---
+with t2:
+    if gtm_json:
+        tag_names = [t['name'] for t in manager.tags]
+        target = st.selectbox("Select Tag", ["Search..."] + tag_names)
+        if target != "Search...":
+            st.json(next(t for t in manager.tags if t['name'] == target))
+    else:
+        st.warning("Upload a GTM JSON to browse tags.")
+
+# --- TAB 3: TAG WIZARD ---
+with t3:
+    st.subheader("Step-by-Step Tag Creation")
+    if st.session_state.wizard_step == 1:
+        n = st.text_input("New Tag Name")
+        tid = st.text_input("Measurement ID")
+        if st.button("Next"):
+            if manager.check_exists(n): st.error("Tag exists!")
+            elif n and tid:
+                st.session_state.tag_data.update({"name": n, "target_id": tid})
+                st.session_state.wizard_step = 2
+                st.rerun()
+
+    elif st.session_state.wizard_step == 2:
+        ev = st.text_input("GA4 Event Name")
+        if st.button("Review"):
+            st.session_state.tag_data['event_name'] = ev
+            st.session_state.wizard_step = 3
+            st.rerun()
+
+    elif st.session_state.wizard_step == 3:
+        st.write("### Configuration Summary")
+        st.table(pd.DataFrame([st.session_state.tag_data]).T)
+        out = manager.generate_tag_json(st.session_state.tag_data)
+        st.download_button("Export JSON for Merge", data=json.dumps(out, indent=4), file_name="gtm_partial.json")
+        if st.button("Reset"):
+            st.session_state.wizard_step = 1
+            st.rerun()
 class WorkspaceInspector:
     """A white-label auditor for GTM containers."""
     def __init__(self, data=None):
