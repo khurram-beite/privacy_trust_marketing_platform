@@ -1,102 +1,113 @@
-"""
-GA4 CSV data loader.
-Handles GA4 export format which has 7 comment/metadata rows before the actual headers.
-"""
-
+import streamlit as st
 import pandas as pd
 import io
 import json
 from pathlib import Path
+import traceback
 
-GA4_SKIP_ROWS = 9  # GA4 exports have metadata rows before the actual header
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Leadar GA4 Dashboard", layout="wide")
+GA4_SKIP_ROWS = 9 
 
+# --- DATA LOADING LOGIC ---
 
 def _load_csv(path_or_text: str, skip: int = GA4_SKIP_ROWS) -> pd.DataFrame:
     """Load a GA4-style CSV, skipping the metadata header block."""
-    if "\n" in path_or_text or "," in path_or_text[:50]:
-        # treat as raw text
-        try:
-            return pd.read_csv(io.StringIO(path_or_text), skiprows=skip)
-        except Exception:
-            return pd.read_csv(io.StringIO(path_or_text), skiprows=skip - 1)
-    else:
-        try:
-            return pd.read_csv(path_or_text, skiprows=skip)
-        except Exception:
-            return pd.read_csv(path_or_text, skiprows=skip - 1)
+    try:
+        # Check if it's a path or raw string
+        if isinstance(path_or_text, str) and ("\n" in path_or_text or "," in path_or_text[:50]):
+            content = io.StringIO(path_or_text)
+        else:
+            content = path_or_text
 
+        return pd.read_csv(content, skiprows=skip)
+    except Exception:
+        # Fallback for slightly different GA4 export formats
+        if isinstance(path_or_text, str) and ("\n" in path_or_text or "," in path_or_text[:50]):
+            content = io.StringIO(path_or_text)
+        else:
+            content = path_or_text
+        return pd.read_csv(content, skiprows=skip - 1)
 
-def load_traffic(source=None) -> pd.DataFrame:
-    """Load traffic acquisition data."""
-    if source is None:
-        source = Path(__file__).parent.parent.parent / "data" / "traffic.csv"
-    df = _load_csv(str(source))
+def load_traffic(source) -> pd.DataFrame:
+    df = _load_csv(source)
     df.columns = [c.strip() for c in df.columns]
-    # Rename for convenience
     col_map = {
         df.columns[0]: "channel",
         df.columns[1]: "sessions",
         df.columns[2]: "engaged_sessions",
-        df.columns[3]: "engagement_rate",
-        df.columns[4]: "avg_engagement_time",
-        df.columns[5]: "events_per_session",
-        df.columns[6]: "event_count",
-        df.columns[7]: "key_events",
         df.columns[8]: "key_event_rate",
     }
     df = df.rename(columns=col_map)
-    df["sessions"] = pd.to_numeric(df["sessions"], errors="coerce")
-    df["key_events"] = pd.to_numeric(df["key_events"], errors="coerce")
-    df["engagement_rate"] = pd.to_numeric(df["engagement_rate"], errors="coerce")
+    for col in ["sessions", "key_event_rate"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["sessions"])
 
-
-def load_events(source=None) -> pd.DataFrame:
-    """Load events data."""
-    if source is None:
-        source = Path(__file__).parent.parent.parent / "data" / "events.csv"
-    df = _load_csv(str(source))
-    df.columns = [c.strip() for c in df.columns]
-    col_map = {
-        df.columns[0]: "event_name",
-        df.columns[1]: "event_count",
-        df.columns[2]: "total_users",
-        df.columns[3]: "events_per_user",
-    }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-    df["event_count"] = pd.to_numeric(df["event_count"], errors="coerce")
-    return df.dropna(subset=["event_count"])
-
-
-def load_pages(source=None) -> pd.DataFrame:
-    """Load pages and screens data."""
-    if source is None:
-        source = Path(__file__).parent.parent.parent / "data" / "pages.csv"
-    df = _load_csv(str(source))
+def load_pages(source) -> pd.DataFrame:
+    df = _load_csv(source)
     df.columns = [c.strip() for c in df.columns]
     col_map = {
         df.columns[0]: "page_path",
         df.columns[1]: "views",
         df.columns[2]: "active_users",
-        df.columns[3]: "views_per_user",
-        df.columns[4]: "avg_engagement_time",
-        df.columns[5]: "event_count",
-        df.columns[6]: "key_events",
     }
     df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
     df["views"] = pd.to_numeric(df["views"], errors="coerce")
-    df["key_events"] = pd.to_numeric(df["key_events"], errors="coerce")
-    df["active_users"] = pd.to_numeric(df["active_users"], errors="coerce")
-    df["avg_engagement_time"] = pd.to_numeric(df["avg_engagement_time"], errors="coerce")
-    # Filter out junk rows (blob: URIs, base64 data URIs, wp-admin)
-    junk_patterns = ["blob:", "data:text", "data:application", "base64,", "cache.aspx", "wp-admin", "wp-act.php"]
+    
+    # Filter out WordPress admin/junk paths for leadar.digital cleanup
+    junk_patterns = ["wp-admin", "wp-act.php", "blob:", "base64"]
     mask = ~df["page_path"].str.contains("|".join(junk_patterns), na=False)
     return df[mask].dropna(subset=["views"])
 
+# --- STREAMLIT UI ---
 
-def load_gtm(source=None) -> dict:
-    """Load GTM container JSON."""
-    if source is None:
-        source = Path(__file__).parent.parent.parent / "data" / "gtm_container.json"
-    with open(source, "r") as f:
-        return json.load(f)
+st.title("📊 GA4 Data Explorer")
+st.sidebar.header("Data Sources")
+
+# Path configuration (Relative to current script)
+base_path = Path(__file__).parent.parent.parent / "data"
+traffic_path = base_path / "traffic.csv"
+pages_path = base_path / "pages.csv"
+
+tabs = st.tabs(["Traffic Overview", "Page Performance", "Debug/Raw Data"])
+
+# --- TAB 1: TRAFFIC ---
+with tabs[0]:
+    st.subheader("Traffic Acquisition")
+    if traffic_path.exists():
+        try:
+            df_traffic = load_traffic(str(traffic_path))
+            
+            # Quick Metrics
+            total_sessions = df_traffic["sessions"].sum()
+            st.metric("Total Sessions", f"{total_sessions:,.0f}")
+            
+            # Table
+            st.dataframe(df_traffic, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error loading traffic.csv: {e}")
+    else:
+        st.warning(f"Traffic file not found at: {traffic_path}")
+
+# --- TAB 2: PAGES ---
+with tabs[1]:
+    st.subheader("Page Views & Active Users")
+    if pages_path.exists():
+        try:
+            df_pages = load_pages(str(pages_path))
+            st.bar_chart(df_pages.set_index("page_path")["views"].head(10))
+            st.dataframe(df_pages, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error loading pages.csv: {e}")
+    else:
+        st.warning(f"Pages file not found at: {pages_path}")
+
+# --- TAB 3: DEBUG ---
+with tabs[2]:
+    st.subheader("System Troubleshooting")
+    st.write("**Current Directory:**", Path.cwd())
+    st.write("**Expected Data Path:**", base_path.absolute())
+    
+    if st.button("Show Full Error Traceback"):
+        st.code(traceback.format_exc())
