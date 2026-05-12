@@ -65,11 +65,12 @@ def load_pages(source) -> pd.DataFrame:
 st.title("📊 GA4 Data Explorer")
 st.sidebar.header("Data Sources")
 
-# Path configuration (Relative to current script)
-base_path = Path(__file__).parent.parent.parent / "data"
+# CORRECT Path configuration for Streamlit Cloud
+base_path = Path(__file__).parent / "data"
+
 traffic_path = base_path / "traffic.csv"
 pages_path = base_path / "pages.csv"
-
+events_path = base_path / "events.csv"
 tabs = st.tabs(["Traffic Overview", "Page Performance", "Debug/Raw Data"])
 
 # --- TAB 1: TRAFFIC ---
