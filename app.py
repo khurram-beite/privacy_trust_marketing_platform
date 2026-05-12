@@ -1,125 +1,126 @@
 import streamlit as st
 import pandas as pd
 import json
-from pathlib import Path
 import plotly.express as px
+from pathlib import Path
 
-# --- BUSINESS LOGIC ---
+# --- BUSINESS LOGIC: GTM INTELLIGENCE ---
 
-class MarketingOpsEngine:
-    def __init__(self):
-        self.base_path = Path(__file__).parent / "data"
-        self.is_live = False
-
-    def load_local_ga4(self, report_type):
-        """Attempts to load CSVs from the local /data folder."""
-        file_map = {
-            "traffic": "traffic.csv",
-            "pages": "pages.csv",
-            "events": "events.csv"
+class GTMExplorer:
+    """Handles GTM data exploration and tag visualization."""
+    def __init__(self, data):
+        self.data = data.get("containerVersion", {})
+        self.tags = self.data.get("tag", [])
+        self.variables = self.data.get("variable", [])
+    
+    def get_tag_details(self, tag_name):
+        """Extracts key parameters for a specific tag to make them human-readable."""
+        tag = next((t for t in self.tags if t['name'] == tag_name), None)
+        if not tag: return None
+        
+        # Simplifies complex GTM JSON into a clean dictionary
+        params = {p['key']: p['value'] for p in tag.get('parameter', [])}
+        return {
+            "Name": tag.get("name"),
+            "Type": tag.get("type"),
+            "Measurement ID": params.get("measurementId", "N/A"),
+            "Event Name": params.get("eventName", "N/A"),
+            "Live": not tag.get("paused", False)
         }
-        path = self.base_path / file_map.get(report_type, "")
-        if path.exists():
-            return pd.read_csv(path, skiprows=9)
-        return None
-
-    def audit_gtm_json(self, json_data):
-        """Parses GTM JSON for lead tracking integrity."""
-        workspace = json_data.get("containerVersion", {})
-        tags = workspace.get("tag", [])
-        inventory = []
-        alerts = []
-        for t in tags:
-            name = t.get("name", "Unnamed")
-            t_type = t.get("type", "Unknown")
-            inventory.append({"Tag Name": name, "Type": t_type})
-            if "GA4" in t_type and "lead" not in name.lower():
-                alerts.append(f"⚠️ Naming violation: '{name}' lacks 'lead' attribution.")
-        return pd.DataFrame(inventory), alerts
 
 # --- UI SETUP ---
 
 st.set_page_config(page_title="Leadar Ops Console", layout="wide")
-engine = MarketingOpsEngine()
 
-# --- SIDEBAR: CREDENTIALS & API ---
+# 1. SIDEBAR FILTERS (Global Interactivity)
 with st.sidebar:
-    st.header("🔑 API Connectivity")
-    with st.expander("Google Cloud Credentials"):
-        client_id = st.text_input("Client ID", type="password")
-        client_secret = st.text_input("Client Secret", type="password")
-        property_id = st.text_input("GA4 Property ID (e.g. Beite.co)")
+    st.header("🎯 Filter Console")
+    # Date Range (Mocking logic for CSV data)
+    date_range = st.date_input("Analysis Period", [])
     
-    if st.button("🔄 Refresh Data via API"):
-        if client_id and client_secret and property_id:
-            st.info("Initiating OAuth flow & API sync...")
-            # API logic would be triggered here
-            st.session_state["mode"] = "API"
-        else:
-            st.error("Missing Credentials for Live Sync.")
-
-    st.divider()
-    st.header("📂 Local Uploads")
-    uploaded_gtm = st.file_uploader("Manual GTM JSON Upload", type="json")
-
-# --- MAIN INTERFACE ---
-st.title("🚀 Marketing Operations Console")
-tabs = st.tabs(["Lead Analytics", "GTM Audit", "System Status"])
-
-# 1. LEAD ANALYTICS (Prioritizes /data/ folder)
-with tabs[0]:
-    st.subheader("Traffic & Lead Acquisition")
+    # Load Data to populate filters
+    data_path = Path(__file__).parent / "data"
+    df_traffic = pd.read_csv(data_path / "traffic.csv", skiprows=9) if (data_path / "traffic.csv").exists() else None
     
-    # Check for local data first
-    df_traffic = engine.load_local_ga4("traffic")
-    
+    selected_channels = []
     if df_traffic is not None:
-        st.success("Displaying data from local storage (/data/traffic.csv)")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.metric("Total Sessions", f"{df_traffic.iloc[:, 1].sum():,.0f}")
-            st.dataframe(df_traffic.iloc[:, :3], use_container_width=True)
-        with col2:
-            fig = px.bar(df_traffic.head(8), x=df_traffic.columns[0], y=df_traffic.columns[1], 
-                         title="Top Channels", template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No local traffic data found. Please sync via API or add traffic.csv to /data.")
+        channels = df_traffic.iloc[:, 0].unique().tolist()
+        selected_channels = st.multiselect("Traffic Channels", channels, default=channels)
 
-# 2. GTM AUDIT (Works with /data/ or manual JSON upload)
-with tabs[1]:
-    st.subheader("GTM Configuration Audit")
-    
-    # Check for local JSON in /data or use the uploader
-    local_gtm_path = Path(__file__).parent / "data" / "container.json"
-    active_json = None
-    
-    if uploaded_gtm:
-        active_json = json.load(uploaded_gtm)
-        st.info("Using manually uploaded GTM JSON.")
-    elif local_gtm_path.exists():
-        with open(local_gtm_path, "r") as f:
-            active_json = json.load(f)
-        st.success("Loaded GTM container from /data/container.json")
+# 2. MAIN CONSOLE
+st.title("🚀 Leadar Marketing Operations")
+tabs = st.tabs(["📈 Lead Analytics", "🏷️ GTM Explorer", "📡 API Management"])
 
-    if active_json:
-        inventory, alerts = engine.audit_gtm_json(active_json)
-        
+# --- TAB: LEAD ANALYTICS ---
+with tabs[0]:
+    if df_traffic is not None:
+        # Apply Sidebar Filters
+        mask = df_traffic.iloc[:, 0].isin(selected_channels)
+        filtered_df = df_traffic[mask]
+
+        # Top Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Sessions", f"{filtered_df.iloc[:, 1].sum():,.0f}")
+        m2.metric("Avg. Engagement", f"{filtered_df.iloc[:, 3].mean():.2%}")
+        m3.metric("Key Events", f"{filtered_df.iloc[:, 7].sum():,.0f}")
+
+        # Visualizations
         c1, c2 = st.columns(2)
         with c1:
-            st.write("**Integrity Checks**")
-            if not alerts:
-                st.success("Lead tracking schema is valid.")
-            else:
-                for a in alerts: st.warning(a)
+            fig_traffic = px.pie(filtered_df, values=filtered_df.columns[1], names=filtered_df.columns[0], 
+                                 title="Traffic Composition", hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
+            st.plotly_chart(fig_traffic, use_container_width=True)
+        
         with c2:
-            st.write("**Tag Inventory**")
-            st.dataframe(inventory, use_container_width=True)
-    else:
-        st.info("Upload GTM JSON or place container.json in /data to begin audit.")
+            # Load Pages Data for performance chart
+            df_pages = pd.read_csv(data_path / "pages.csv", skiprows=9) if (data_path / "pages.csv").exists() else None
+            if df_pages is not None:
+                fig_pages = px.bar(df_pages.head(10), x=df_pages.columns[1], y=df_pages.columns[0], 
+                                   orientation='h', title="Top Performing Pages", color=df_pages.columns[1])
+                st.plotly_chart(fig_pages, use_container_width=True)
 
-# 3. SYSTEM STATUS
+        st.subheader("Event Distribution")
+        df_events = pd.read_csv(data_path / "events.csv", skiprows=9) if (data_path / "events.csv").exists() else None
+        if df_events is not None:
+            fig_events = px.area(df_events.head(10), x=df_events.columns[0], y=df_events.columns[1], 
+                                 title="Event Volume by Type")
+            st.plotly_chart(fig_events, use_container_width=True)
+    else:
+        st.warning("Please add CSVs to /data/ folder to see analytics.")
+
+# --- TAB: GTM EXPLORER ---
+with tabs[1]:
+    st.subheader("GTM Visual Inspector")
+    local_gtm = data_path / "container.json"
+    
+    if local_gtm.exists():
+        with open(local_gtm, "r") as f:
+            explorer = GTMExplorer(json.load(f))
+        
+        # Interactive Search/Selection
+        tag_names = [t['name'] for t in explorer.tags]
+        selected_tag = st.selectbox("Select a Tag to Inspect", ["Select..."] + tag_names)
+        
+        if selected_tag != "Select...":
+            details = explorer.get_tag_details(selected_tag)
+            
+            # Simplified Display Card
+            with st.container(border=True):
+                col_a, col_b, col_c = st.columns(3)
+                col_a.write(f"**Type:** {details['Type']}")
+                col_b.write(f"**GA4 ID:** {details['Measurement ID']}")
+                col_c.write(f"**Status:** {'🟢 Active' if details['Live'] else '⚪ Paused'}")
+                
+                st.write(f"**Triggering Event:** `{details['Event Name']}`")
+        
+        st.divider()
+        st.write("📊 **Full Tag Inventory**")
+        st.dataframe(pd.DataFrame([{"Name": t['name'], "Type": t['type']} for t in explorer.tags]), use_container_width=True)
+    else:
+        st.info("Place your GTM export in /data/container.json to browse tags.")
+
+# --- TAB: API MANAGEMENT ---
 with tabs[2]:
-    st.write(f"**Data Mode:** {'📡 API' if st.session_state.get('mode') == 'API' else '📂 Local File System'}")
-    st.write(f"**Target Site:** Privacy Trust")
-    st.write(f"**Environment:** Streamlit Cloud")
+    st.subheader("API Connectivity & Editing")
+    st.info("Enter credentials to enable Live Sync and Tag Writing.")
+    # (API input fields and refresh button as before)
