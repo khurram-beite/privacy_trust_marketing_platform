@@ -1,114 +1,125 @@
 import streamlit as st
 import pandas as pd
-import io
 import json
 from pathlib import Path
-import traceback
+import plotly.express as px
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Leadar GA4 Dashboard", layout="wide")
-GA4_SKIP_ROWS = 9 
+# --- BUSINESS LOGIC ---
 
-# --- DATA LOADING LOGIC ---
+class MarketingOpsEngine:
+    def __init__(self):
+        self.base_path = Path(__file__).parent / "data"
+        self.is_live = False
 
-def _load_csv(path_or_text: str, skip: int = GA4_SKIP_ROWS) -> pd.DataFrame:
-    """Load a GA4-style CSV, skipping the metadata header block."""
-    try:
-        # Check if it's a path or raw string
-        if isinstance(path_or_text, str) and ("\n" in path_or_text or "," in path_or_text[:50]):
-            content = io.StringIO(path_or_text)
-        else:
-            content = path_or_text
+    def load_local_ga4(self, report_type):
+        """Attempts to load CSVs from the local /data folder."""
+        file_map = {
+            "traffic": "traffic.csv",
+            "pages": "pages.csv",
+            "events": "events.csv"
+        }
+        path = self.base_path / file_map.get(report_type, "")
+        if path.exists():
+            return pd.read_csv(path, skiprows=9)
+        return None
 
-        return pd.read_csv(content, skiprows=skip)
-    except Exception:
-        # Fallback for slightly different GA4 export formats
-        if isinstance(path_or_text, str) and ("\n" in path_or_text or "," in path_or_text[:50]):
-            content = io.StringIO(path_or_text)
-        else:
-            content = path_or_text
-        return pd.read_csv(content, skiprows=skip - 1)
+    def audit_gtm_json(self, json_data):
+        """Parses GTM JSON for lead tracking integrity."""
+        workspace = json_data.get("containerVersion", {})
+        tags = workspace.get("tag", [])
+        inventory = []
+        alerts = []
+        for t in tags:
+            name = t.get("name", "Unnamed")
+            t_type = t.get("type", "Unknown")
+            inventory.append({"Tag Name": name, "Type": t_type})
+            if "GA4" in t_type and "lead" not in name.lower():
+                alerts.append(f"⚠️ Naming violation: '{name}' lacks 'lead' attribution.")
+        return pd.DataFrame(inventory), alerts
 
-def load_traffic(source) -> pd.DataFrame:
-    df = _load_csv(source)
-    df.columns = [c.strip() for c in df.columns]
-    col_map = {
-        df.columns[0]: "channel",
-        df.columns[1]: "sessions",
-        df.columns[2]: "engaged_sessions",
-        df.columns[8]: "key_event_rate",
-    }
-    df = df.rename(columns=col_map)
-    for col in ["sessions", "key_event_rate"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna(subset=["sessions"])
+# --- UI SETUP ---
 
-def load_pages(source) -> pd.DataFrame:
-    df = _load_csv(source)
-    df.columns = [c.strip() for c in df.columns]
-    col_map = {
-        df.columns[0]: "page_path",
-        df.columns[1]: "views",
-        df.columns[2]: "active_users",
-    }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-    df["views"] = pd.to_numeric(df["views"], errors="coerce")
+st.set_page_config(page_title="Leadar Ops Console", layout="wide")
+engine = MarketingOpsEngine()
+
+# --- SIDEBAR: CREDENTIALS & API ---
+with st.sidebar:
+    st.header("🔑 API Connectivity")
+    with st.expander("Google Cloud Credentials"):
+        client_id = st.text_input("Client ID", type="password")
+        client_secret = st.text_input("Client Secret", type="password")
+        property_id = st.text_input("GA4 Property ID (e.g. Beite.co)")
     
-    # Filter out WordPress admin/junk paths for leadar.digital cleanup
-    junk_patterns = ["wp-admin", "wp-act.php", "blob:", "base64"]
-    mask = ~df["page_path"].str.contains("|".join(junk_patterns), na=False)
-    return df[mask].dropna(subset=["views"])
+    if st.button("🔄 Refresh Data via API"):
+        if client_id and client_secret and property_id:
+            st.info("Initiating OAuth flow & API sync...")
+            # API logic would be triggered here
+            st.session_state["mode"] = "API"
+        else:
+            st.error("Missing Credentials for Live Sync.")
 
-# --- STREAMLIT UI ---
+    st.divider()
+    st.header("📂 Local Uploads")
+    uploaded_gtm = st.file_uploader("Manual GTM JSON Upload", type="json")
 
-st.title("📊 GA4 Data Explorer")
-st.sidebar.header("Data Sources")
+# --- MAIN INTERFACE ---
+st.title("🚀 Marketing Operations Console")
+tabs = st.tabs(["Lead Analytics", "GTM Audit", "System Status"])
 
-# CORRECT Path configuration for Streamlit Cloud
-base_path = Path(__file__).parent / "data"
-
-traffic_path = base_path / "traffic.csv"
-pages_path = base_path / "pages.csv"
-events_path = base_path / "events.csv"
-tabs = st.tabs(["Traffic Overview", "Page Performance", "Debug/Raw Data"])
-
-# --- TAB 1: TRAFFIC ---
+# 1. LEAD ANALYTICS (Prioritizes /data/ folder)
 with tabs[0]:
-    st.subheader("Traffic Acquisition")
-    if traffic_path.exists():
-        try:
-            df_traffic = load_traffic(str(traffic_path))
-            
-            # Quick Metrics
-            total_sessions = df_traffic["sessions"].sum()
-            st.metric("Total Sessions", f"{total_sessions:,.0f}")
-            
-            # Table
-            st.dataframe(df_traffic, use_container_width=True)
-        except Exception as e:
-            st.error(f"Error loading traffic.csv: {e}")
-    else:
-        st.warning(f"Traffic file not found at: {traffic_path}")
-
-# --- TAB 2: PAGES ---
-with tabs[1]:
-    st.subheader("Page Views & Active Users")
-    if pages_path.exists():
-        try:
-            df_pages = load_pages(str(pages_path))
-            st.bar_chart(df_pages.set_index("page_path")["views"].head(10))
-            st.dataframe(df_pages, use_container_width=True)
-        except Exception as e:
-            st.error(f"Error loading pages.csv: {e}")
-    else:
-        st.warning(f"Pages file not found at: {pages_path}")
-
-# --- TAB 3: DEBUG ---
-with tabs[2]:
-    st.subheader("System Troubleshooting")
-    st.write("**Current Directory:**", Path.cwd())
-    st.write("**Expected Data Path:**", base_path.absolute())
+    st.subheader("Traffic & Lead Acquisition")
     
-    if st.button("Show Full Error Traceback"):
-        st.code(traceback.format_exc())
+    # Check for local data first
+    df_traffic = engine.load_local_ga4("traffic")
+    
+    if df_traffic is not None:
+        st.success("Displaying data from local storage (/data/traffic.csv)")
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.metric("Total Sessions", f"{df_traffic.iloc[:, 1].sum():,.0f}")
+            st.dataframe(df_traffic.iloc[:, :3], use_container_width=True)
+        with col2:
+            fig = px.bar(df_traffic.head(8), x=df_traffic.columns[0], y=df_traffic.columns[1], 
+                         title="Top Channels", template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No local traffic data found. Please sync via API or add traffic.csv to /data.")
+
+# 2. GTM AUDIT (Works with /data/ or manual JSON upload)
+with tabs[1]:
+    st.subheader("GTM Configuration Audit")
+    
+    # Check for local JSON in /data or use the uploader
+    local_gtm_path = Path(__file__).parent / "data" / "container.json"
+    active_json = None
+    
+    if uploaded_gtm:
+        active_json = json.load(uploaded_gtm)
+        st.info("Using manually uploaded GTM JSON.")
+    elif local_gtm_path.exists():
+        with open(local_gtm_path, "r") as f:
+            active_json = json.load(f)
+        st.success("Loaded GTM container from /data/container.json")
+
+    if active_json:
+        inventory, alerts = engine.audit_gtm_json(active_json)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("**Integrity Checks**")
+            if not alerts:
+                st.success("Lead tracking schema is valid.")
+            else:
+                for a in alerts: st.warning(a)
+        with c2:
+            st.write("**Tag Inventory**")
+            st.dataframe(inventory, use_container_width=True)
+    else:
+        st.info("Upload GTM JSON or place container.json in /data to begin audit.")
+
+# 3. SYSTEM STATUS
+with tabs[2]:
+    st.write(f"**Data Mode:** {'📡 API' if st.session_state.get('mode') == 'API' else '📂 Local File System'}")
+    st.write(f"**Target Site:** Privacy Trust")
+    st.write(f"**Environment:** Streamlit Cloud")
